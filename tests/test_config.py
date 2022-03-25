@@ -7,7 +7,8 @@ import yaml
 from click.testing import CliRunner
 from mock import patch
 
-from ggshield.config import Cache, Config, replace_in_keys
+from ggshield.cache import Cache
+from ggshield.config import Config, replace_in_keys
 
 
 @pytest.fixture(scope="session")
