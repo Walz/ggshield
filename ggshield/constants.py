@@ -12,3 +12,4 @@ LOCAL_CONFIG_PATHS = ["./.gitguardian", "./.gitguardian.yml", "./.gitguardian.ya
 DEFAULT_LOCAL_CONFIG_PATH = "./.gitguardian.yaml"
 DEFAULT_API_URL = "https://api.gitguardian.com"
 DEFAULT_DASHBOARD_URL = "https://dashboard.gitguardian.com"
+AUTH_CONFIG_FILENAME = "auth_config.yaml"

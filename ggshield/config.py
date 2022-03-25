@@ -1,12 +1,16 @@
 import os
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import InitVar, asdict, dataclass, field, fields
+from datetime import datetime, timedelta
 from functools import cached_property
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import click
 import yaml
+from appdirs import user_config_dir
 
 from ggshield.constants import (
+    AUTH_CONFIG_FILENAME,
     DEFAULT_API_URL,
     DEFAULT_DASHBOARD_URL,
     DEFAULT_LOCAL_CONFIG_PATH,
@@ -170,6 +174,70 @@ class UserConfig(YamlFileConfig):
             self.matches_ignore.append(secret)
 
 
+@dataclass
+class AccountConfig:
+    id: int
+    url: str
+    token: str
+    type: str
+    token_name: str
+    raw_expire_at: InitVar[str]
+    expire_at: Optional[datetime] = None
+
+    def __post_init__(self, raw_expire_at: str) -> None:
+        self.expire_at = datetime.fromisoformat(raw_expire_at)
+
+
+@dataclass
+class HostConfig:
+    name: str
+    account: AccountConfig  # Only handle 1 account per host for the time being
+    default_token_lifetime: Optional[timedelta] = None
+
+    @classmethod
+    def load(cls, data: Dict) -> "HostConfig":
+        assert len(data["accounts"]) <= 1
+        data["account"] = AccountConfig(**data["account"])
+        return cls(**data)
+
+
+def get_auth_config_dir() -> str:
+    dir_path: str = user_config_dir(appname="ggshield", appauthor="GitGuardian")
+    return dir_path
+
+
+def get_auth_config_filepath() -> str:
+    return os.path.join(get_auth_config_dir(), AUTH_CONFIG_FILENAME)
+
+
+def ensure_path_exists(dir_path: str) -> None:
+    Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+
+@dataclass
+class AuthConfig(YamlFileConfig):
+    default_host: str = "dashboard.gitguardian.com"
+    default_token_lifetime: Optional[int] = None
+    hosts: Mapping[str, HostConfig] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls) -> "AuthConfig":
+        """Load the auth config from the app config file"""
+        config_path = get_auth_config_filepath()
+        data = load_yaml(config_path)
+        if data:
+            data["hosts"] = {
+                key: HostConfig.load(value) for key, value in data["hosts"].items()
+            }
+            return cls(**data)
+        return cls()
+
+    def save(self) -> None:
+        config_path = get_auth_config_filepath()
+        ensure_path_exists(get_auth_config_dir())
+        self.save_yaml(config_path)
+
+
 def get_attr_mapping(
     classes: Iterable[Tuple[Type[YamlFileConfig], str]]
 ) -> Dict[str, str]:
@@ -187,11 +255,14 @@ def get_attr_mapping(
 
 class Config:
     user_config: UserConfig
-    _attr_mapping: Mapping[str, str] = get_attr_mapping([(UserConfig, "user_config")])
+    _attr_mapping: Mapping[str, str] = get_attr_mapping(
+        [(UserConfig, "user_config"), (AuthConfig, "auth_config")]
+    )
 
     def __init__(self, config_path: Optional[str] = None):
         # bypass __setattr__ to avoid infinite recursion
         self.__dict__["user_config"] = UserConfig.load(config_path=config_path)
+        self.__dict__["auth_config"] = AuthConfig.load()
 
     def __getattr__(self, name: str) -> Any:
         try:
@@ -209,6 +280,7 @@ class Config:
 
     def save(self) -> None:
         self.user_config.save()
+        self.auth_config.save()
 
     @cached_property
     def gitguardian_api_key(self) -> Optional[str]:
