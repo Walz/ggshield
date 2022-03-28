@@ -1,5 +1,5 @@
 import os
-from dataclasses import InitVar, asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from functools import cached_property
 from pathlib import Path
@@ -68,8 +68,7 @@ class YamlFileConfig:
 
     def update_config(self, data: Dict[str, Any]) -> bool:
         """
-        Update the current config
-        raise an error if trying to set a field that does not exist
+        Update the current config, ignoring the unrecognized keys
         """
         field_names = {field_.name for field_ in fields(self)}
         replace_in_keys(data, old_char="-", new_char="_")
@@ -117,7 +116,7 @@ class UserConfig(YamlFileConfig):
 
     def save(self) -> None:
         """
-        Save config in the first CONFIG_LOCAL or the path it the config was loaded from
+        Save config in the first CONFIG_LOCAL or the path it was loaded from
         If no local config file, creates a local .gitguardian.yaml
         """
         config_path = self.config_path or DEFAULT_LOCAL_CONFIG_PATH
@@ -181,11 +180,12 @@ class AccountConfig:
     token: str
     type: str
     token_name: str
-    raw_expire_at: InitVar[str]
-    expire_at: Optional[datetime] = None
+    expire_at: Optional[datetime]
 
-    def __post_init__(self, raw_expire_at: str) -> None:
-        self.expire_at = datetime.fromisoformat(raw_expire_at)
+    def __post_init__(self) -> None:
+        if self.expire_at is not None and not isinstance(self.expire_at, datetime):
+            # Allow passing expire_at as an isoformat string
+            self.expire_at = datetime.fromisoformat(self.expire_at)  # type: ignore
 
 
 @dataclass
