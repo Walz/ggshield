@@ -9,6 +9,9 @@ from ggshield.constants import CACHE_FILENAME
 from ggshield.filter import get_ignore_sha
 
 
+SECRETS_CACHE_KEY = "last_found_secrets"
+
+
 class Cache:
     last_found_secrets: List
 
@@ -40,14 +43,14 @@ class Cache:
         return True
 
     def update_cache(self, **kwargs: Any) -> None:
-        if "last_found_secrets" in kwargs:
-            self.last_found_secrets = kwargs.pop("last_found_secrets")
+        if SECRETS_CACHE_KEY in kwargs:
+            self.last_found_secrets = kwargs.pop(SECRETS_CACHE_KEY)
         if kwargs:
             for key in kwargs.keys():
                 click.echo(f'Unrecognized key in cache "{key}"')
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"last_found_secrets": self.last_found_secrets}
+        return {SECRETS_CACHE_KEY: self.last_found_secrets}
 
     def save(self) -> None:
         if not self.last_found_secrets:
