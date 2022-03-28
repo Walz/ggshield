@@ -1,9 +1,10 @@
+import copy
 import os
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type, Union
 
 import click
 import yaml
@@ -20,12 +21,28 @@ from ggshield.constants import (
 from ggshield.types import IgnoredMatch
 
 
-def replace_in_keys(data: Dict, old_char: str, new_char: str) -> None:
+def replace_in_keys(
+    data: Union[List, Dict], old_char: str, new_char: str, recursive: bool = True
+) -> None:
     """Replace old_char with new_char in data keys."""
-    for key in list(data):
-        if old_char in key:
-            new_key = key.replace(old_char, new_char)
-            data[new_key] = data.pop(key)
+    if recursive:
+        if isinstance(data, dict):
+            for key, value in list(data.items()):
+                replace_in_keys(value, old_char=old_char, new_char=new_char)
+                if old_char in key:
+                    new_key = key.replace(old_char, new_char)
+                    data[new_key] = data.pop(key)
+        elif isinstance(data, list):
+            for element in data:
+                replace_in_keys(
+                    element, old_char=old_char, new_char=new_char, recursive=True
+                )
+    else:
+        assert isinstance(data, dict)
+        for key, value in list(data.items()):
+            if old_char in key:
+                new_key = key.replace(old_char, new_char)
+                data[new_key] = data.pop(key)
 
 
 def load_yaml(path: str, raise_exc: bool = False) -> Optional[Dict[str, Any]]:
@@ -43,11 +60,34 @@ def load_yaml(path: str, raise_exc: bool = False) -> Optional[Dict[str, Any]]:
                 click.echo(message)
                 return None
         else:
+            replace_in_keys(data, old_char="-", new_char="_")
             return data
 
 
 def get_global_path(filename: str) -> str:
     return os.path.join(os.path.expanduser("~"), filename)
+
+
+def custom_asdict(obj: Any, root: bool = False) -> Union[List, Dict]:
+    """
+    customization of dataclasses.asdict to allow implementing a "to_dict"
+    method for customization.
+    root=True skips the first to_dict, to allow calling this function from "to_dict"
+    """
+    if is_dataclass(obj):
+        if not root and hasattr(obj, "to_dict"):
+            return obj.to_dict()  # type: ignore
+        result = []
+        for f in fields(obj):
+            value = custom_asdict(getattr(obj, f.name))
+            result.append((f.name, value))
+        return dict(result)
+    elif isinstance(obj, (list, tuple)):
+        return type(obj)(custom_asdict(v) for v in obj)  # type: ignore
+    elif isinstance(obj, dict):
+        return type(obj)((custom_asdict(k), custom_asdict(v)) for k, v in obj.items())
+    else:
+        return copy.deepcopy(obj)  # type: ignore
 
 
 class YamlFileConfig:
@@ -56,15 +96,8 @@ class YamlFileConfig:
     def __init__(self, **kwargs: Any) -> None:
         raise NotImplementedError
 
-    def to_dict(self) -> Dict:
-        data = asdict(self)
-        replace_in_keys(data, old_char="_", new_char="-")
-        return data
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "YamlFileConfig":
-        replace_in_keys(data, old_char="-", new_char="_")
-        return cls(**data)
+    def to_dict(self) -> Union[List, Dict]:
+        return custom_asdict(self, root=True)
 
     def update_config(self, data: Dict[str, Any]) -> bool:
         """
@@ -85,14 +118,23 @@ class YamlFileConfig:
         return True
 
     def save_yaml(self, path: str) -> None:
+        data = self.to_dict()
+        replace_in_keys(data, old_char="_", new_char="-")
         with open(path, "w") as f:
             try:
-                stream = yaml.dump(self.to_dict(), indent=2, default_flow_style=False)
+                stream = yaml.dump(data, indent=2, default_flow_style=False)
                 f.write(stream)
             except Exception as e:
                 raise click.ClickException(
                     f"Error while saving config in {path}:\n{str(e)}"
                 ) from e
+
+    def save(self) -> None:
+        raise NotImplementedError
+
+    @classmethod
+    def load(cls) -> "YamlFileConfig":
+        raise NotImplementedError
 
 
 @dataclass
@@ -175,7 +217,7 @@ class UserConfig(YamlFileConfig):
 
 @dataclass
 class AccountConfig:
-    id: int
+    account_id: int
     url: str
     token: str
     type: str
@@ -185,20 +227,34 @@ class AccountConfig:
     def __post_init__(self) -> None:
         if self.expire_at is not None and not isinstance(self.expire_at, datetime):
             # Allow passing expire_at as an isoformat string
-            self.expire_at = datetime.fromisoformat(self.expire_at)  # type: ignore
+            self.expire_at = datetime.fromisoformat(self.expire_at.replace("Z", "+00:00"))  # type: ignore
+
+    def to_dict(self) -> Dict:
+        data: Dict = custom_asdict(self, root=True)  # type: ignore
+        expire_at = data["expire_at"]
+        data["expire_at"] = expire_at.isoformat() if expire_at is not None else None
+        return data
 
 
 @dataclass
 class HostConfig:
-    name: str
     account: AccountConfig  # Only handle 1 account per host for the time being
+    name: Optional[str] = None
     default_token_lifetime: Optional[timedelta] = None
 
     @classmethod
     def load(cls, data: Dict) -> "HostConfig":
-        assert len(data["accounts"]) <= 1
-        data["account"] = AccountConfig(**data["account"])
+        accounts = data["accounts"]
+        assert (
+            len(accounts) == 1
+        ), "Each GitGuardian host should have exactly one account"
+        data["account"] = AccountConfig(**data.pop("accounts")[0])
         return cls(**data)
+
+    def to_dict(self) -> Union[List, Dict]:
+        data: Dict = custom_asdict(self, root=True)  # type: ignore
+        data["accounts"] = [data.pop("account")]
+        return data
 
 
 def get_auth_config_dir() -> str:
@@ -216,7 +272,7 @@ def ensure_path_exists(dir_path: str) -> None:
 
 @dataclass
 class AuthConfig(YamlFileConfig):
-    default_host: str = "dashboard.gitguardian.com"
+    default_host: str = "https://dashboard.gitguardian.com"
     default_token_lifetime: Optional[int] = None
     hosts: Mapping[str, HostConfig] = field(default_factory=dict)
 
@@ -255,6 +311,7 @@ def get_attr_mapping(
 
 class Config:
     user_config: UserConfig
+    auth_config: AuthConfig
     _attr_mapping: Mapping[str, str] = get_attr_mapping(
         [(UserConfig, "user_config"), (AuthConfig, "auth_config")]
     )

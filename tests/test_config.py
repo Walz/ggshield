@@ -1,12 +1,19 @@
 import os
 import sys
+from copy import deepcopy
+from unittest.mock import Mock
 
 import pytest
 import yaml
 from click.testing import CliRunner
 from mock import patch
 
-from ggshield.config import Config, get_global_path, replace_in_keys
+from ggshield.config import (
+    Config,
+    ensure_path_exists,
+    get_auth_config_filepath,
+    replace_in_keys,
+)
 
 
 @pytest.fixture(scope="session")
@@ -21,13 +28,8 @@ def cli_fs_runner(cli_runner):
         yield cli_runner
 
 
-def write_local(filename, data):
+def write(filename, data):
     with open(filename, "w") as file:
-        file.write(yaml.dump(data))
-
-
-def write_global(filename, data):
-    with open(get_global_path(filename), "w") as file:
         file.write(yaml.dump(data))
 
 
@@ -41,10 +43,10 @@ class TestUtils:
 
 
 class TestUserConfig:
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", ["test_local_gitguardian.yml"])
+    @patch("ggshield.config.LOCAL_CONFIG_PATHS", ["/tmp/test_local_gitguardian.yml"])
     @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
     def test_parsing_error(cli_fs_runner, capsys):
-        filepath = "test_local_gitguardian.yml"
+        filepath = "/tmp/test_local_gitguardian.yml"
         with open(filepath, "w") as file:
             file.write("Not a:\nyaml file.\n")
 
@@ -55,37 +57,35 @@ class TestUserConfig:
 
         assert f"Parsing error while reading {filepath}:" in out
 
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
     @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
-    def test_display_options(self, cli_fs_runner):
-        write_local(".gitguardian.yml", {"verbose": True, "show_secrets": True})
+    def test_display_options(self, cli_fs_runner, local_config_path):
+        write(local_config_path, {"verbose": True, "show_secrets": True})
 
         config = Config()
         assert config.verbose is True
         assert config.show_secrets is True
 
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
     @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
-    def test_unknown_option(self, cli_fs_runner, capsys):
-        write_local(".gitguardian.yml", {"verbosity": True})
+    def test_unknown_option(self, cli_fs_runner, capsys, local_config_path):
+        write(local_config_path, {"verbosity": True})
 
         Config()
         captured = capsys.readouterr()
         assert "Unrecognized key in config" in captured.out
 
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [".gitguardian.yaml"])
-    def test_display_options_inheritance(self, cli_fs_runner):
-        write_local(
-            ".gitguardian.yml",
+    def test_display_options_inheritance(
+        self, cli_fs_runner, local_config_path, global_config_path
+    ):
+        write(
+            local_config_path,
             {
                 "verbose": True,
                 "show_secrets": False,
                 "api_url": "https://gitguardian.com",
             },
         )
-        write_global(
-            ".gitguardian.yaml",
+        write(
+            global_config_path,
             {
                 "verbose": False,
                 "show_secrets": True,
@@ -98,19 +98,18 @@ class TestUserConfig:
         assert config.show_secrets is False
         assert config.api_url == "https://gitguardian.com"
 
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
     @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
-    def test_exclude_regex(self, cli_fs_runner):
-        write_local(".gitguardian.yml", {"paths-ignore": ["/tests/"]})
+    def test_exclude_regex(self, cli_fs_runner, local_config_path):
+        write(local_config_path, {"paths-ignore": ["/tests/"]})
 
         config = Config()
         assert r"/tests/" in config.paths_ignore
 
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [".gitguardian.yaml"])
-    def test_accumulation_matches(self, cli_fs_runner):
-        write_local(
-            ".gitguardian.yml",
+    def test_accumulation_matches(
+        self, cli_fs_runner, local_config_path, global_config_path
+    ):
+        write(
+            local_config_path,
             {
                 "matches_ignore": [
                     {"name": "", "match": "one"},
@@ -118,8 +117,9 @@ class TestUserConfig:
                 ]
             },
         )
-        write_global(
-            ".gitguardian.yaml", {"matches_ignore": [{"name": "", "match": "three"}]}
+        write(
+            global_config_path,
+            {"matches_ignore": [{"name": "", "match": "three"}]},
         )
         config = Config()
         assert config.matches_ignore == [
@@ -127,3 +127,137 @@ class TestUserConfig:
             {"match": "one", "name": ""},
             {"match": "two", "name": ""},
         ]
+
+
+auth_config_filepath = f"{get_auth_config_filepath()}_test"
+
+
+@patch(
+    "ggshield.config.get_auth_config_filepath",
+    Mock(return_value=(auth_config_filepath)),
+)
+class TestAuthConfig:
+    default_config = {
+        "default-host": "default",
+        "default-token-lifetime": 7,  # days
+        "hosts": {
+            "default": {
+                "name": "default",
+                "default-token-lifetime": 1,
+                "accounts": [
+                    {
+                        "account-id": 23,
+                        "url": "dashboard.gitguardian.com",
+                        "token": "62890f237c703c92fbda8236ec2a055ac21332a46115005c976d68b900535fb5",
+                        "type": "pat",
+                        "token-name": "my_token",
+                        "expire-at": "2022-02-23T12:34:56+00:00",
+                    }
+                ],
+            },
+            "dashboard.onprem.gitguardian.ovh": {
+                "name": None,
+                "default-token-lifetime": 0,  # no expiry
+                "accounts": [
+                    {
+                        "account-id": 1,
+                        "url": "dashboard.onprem.gitguardian.ovh",
+                        "token": "8ecffbaeedcd2f090546efeed3bc48a5f4a04a1196637aef6b3f6bbcfd58a96b",
+                        "type": "sat",
+                        "token-name": "my_other_token",
+                        "expire-at": "2022-02-24T12:34:56+00:00",
+                    }
+                ],
+            },
+        },
+    }
+
+    @pytest.fixture(autouse=True)
+    def clean_file(self):
+        try:
+            os.remove(auth_config_filepath)
+        except FileNotFoundError:
+            pass
+        yield
+
+    def test_load(self):
+        ensure_path_exists("/".join(auth_config_filepath.split("/")[:-1]))
+        with open(auth_config_filepath, "w") as f:
+            f.write(yaml.dump(self.default_config))
+
+        config = Config()
+
+        assert config.hosts["default"].account.token_name == "my_token"
+
+        config_data = config.auth_config.to_dict()
+        replace_in_keys(config_data, old_char="_", new_char="-")
+        assert config_data == self.default_config
+
+    @pytest.mark.parametrize("n", [0, 2])
+    def test_no_account(self, n):
+        raw_config = deepcopy(self.default_config)
+        raw_config["hosts"]["default"]["accounts"] = (
+            raw_config["hosts"]["default"]["accounts"] * n
+        )
+        ensure_path_exists("/".join(auth_config_filepath.split("/")[:-1]))
+        with open(auth_config_filepath, "w") as f:
+            f.write(yaml.dump(raw_config))
+
+        with pytest.raises(
+            AssertionError,
+            match="Each GitGuardian host should have exactly one account",
+        ):
+            Config()
+
+    def test_invalid_format(self, capsys):
+        ensure_path_exists("/".join(auth_config_filepath.split("/")[:-1]))
+        with open(auth_config_filepath, "w") as f:
+            f.write("Not a:\nyaml file.\n")
+
+        Config()
+        out, err = capsys.readouterr()
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+
+        assert f"Parsing error while reading {auth_config_filepath}:" in out
+
+    def test_token_not_expiring(self):
+        raw_config = deepcopy(self.default_config)
+        raw_config["hosts"]["default"]["accounts"][0]["expire-at"] = None
+        ensure_path_exists("/".join(auth_config_filepath.split("/")[:-1]))
+        with open(auth_config_filepath, "w") as f:
+            f.write(yaml.dump(raw_config))
+
+        config = Config()
+
+        assert config.hosts["default"].account.expire_at is None
+
+    def test_update(self):
+        config = Config()
+        config.default_host = "custom"
+
+        assert Config().default_host != "custom"
+
+        config.save()
+
+        assert Config().default_host == "custom"
+
+    def test_load_file_not_existing(self):
+        config = Config()
+
+        assert config.default_host == "https://dashboard.gitguardian.com"
+        assert config.default_token_lifetime is None
+        assert config.hosts == {}
+
+    def test_save_file_not_existing(self):
+        config = Config()
+        try:
+            os.remove(auth_config_filepath)
+        except FileNotFoundError:
+            pass
+
+        config.default_host = "custom"
+        config.save()
+        updated_config = Config()
+
+        assert updated_config.default_host == "custom"
