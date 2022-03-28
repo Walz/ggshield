@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 
@@ -7,7 +6,6 @@ import yaml
 from click.testing import CliRunner
 from mock import patch
 
-from ggshield.cache import Cache
 from ggshield.config import Config, get_global_path, replace_in_keys
 
 
@@ -23,20 +21,6 @@ def cli_fs_runner(cli_runner):
         yield cli_runner
 
 
-@patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-@patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
-def test_parsing_error(cli_fs_runner, capsys):
-    with open(".gitguardian.yml", "w") as file:
-        file.write("Not a:\nyaml file.\n")
-
-    Config()
-    out, err = capsys.readouterr()
-    sys.stdout.write(out)
-    sys.stderr.write(err)
-
-    assert "Parsing error while reading .gitguardian.yml:" in out
-
-
 def write_local(filename, data):
     with open(filename, "w") as file:
         file.write(yaml.dump(data))
@@ -47,7 +31,30 @@ def write_global(filename, data):
         file.write(yaml.dump(data))
 
 
-class TestConfig:
+class TestUtils:
+    def test_replace_in_keys(self):
+        data = {"last-found-secrets": {"XXX"}}
+        replace_in_keys(data, "-", "_")
+        assert data == {"last_found_secrets": {"XXX"}}
+        replace_in_keys(data, "_", "-")
+        assert data == {"last-found-secrets": {"XXX"}}
+
+
+class TestUserConfig:
+    @patch("ggshield.config.LOCAL_CONFIG_PATHS", ["test_local_gitguardian.yml"])
+    @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
+    def test_parsing_error(cli_fs_runner, capsys):
+        filepath = "test_local_gitguardian.yml"
+        with open(filepath, "w") as file:
+            file.write("Not a:\nyaml file.\n")
+
+        Config()
+        out, err = capsys.readouterr()
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+
+        assert f"Parsing error while reading {filepath}:" in out
+
     @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
     @patch("ggshield.config.GLOBAL_CONFIG_FILENAMES", [])
     def test_display_options(self, cli_fs_runner):
@@ -120,92 +127,3 @@ class TestConfig:
             {"match": "one", "name": ""},
             {"match": "two", "name": ""},
         ]
-
-
-class TestUtils:
-    def test_replace_in_keys(self):
-        data = {"last-found-secrets": {"XXX"}}
-        replace_in_keys(data, "-", "_")
-        assert data == {"last_found_secrets": {"XXX"}}
-        replace_in_keys(data, "_", "-")
-        assert data == {"last-found-secrets": {"XXX"}}
-
-
-class TestCache:
-    def test_defaults(self, cli_fs_runner):
-        cache = Cache()
-        assert cache.last_found_secrets == []
-
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    def test_load_cache_and_purge(self, cli_fs_runner):
-        with open(".cache_ggshield", "w") as file:
-            json.dump({"last_found_secrets": [{"name": "", "match": "XXX"}]}, file)
-        cache = Cache()
-        assert cache.last_found_secrets == [{"name": "", "match": "XXX"}]
-
-        cache.purge()
-        assert cache.last_found_secrets == []
-
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    def test_load_invalid_cache(self, cli_fs_runner, capsys):
-        with open(".cache_ggshield", "w") as file:
-            json.dump({"invalid_option": True}, file)
-
-        Cache()
-        captured = capsys.readouterr()
-        assert "Unrecognized key in cache" in captured.out
-
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    def test_save_cache(self, cli_fs_runner):
-        with open(".cache_ggshield", "w") as file:
-            json.dump({}, file)
-        cache = Cache()
-        cache.update_cache(last_found_secrets=["XXX"])
-        cache.save()
-        with open(".cache_ggshield", "r") as file:
-            file_content = json.load(file)
-            assert file_content == {"last_found_secrets": ["XXX"]}
-
-    def test_read_only_fs(self):
-        """
-        GIVEN a read-only file-system
-        WHEN save is called
-        THEN it shouldn't raise an exception
-        """
-        cache = Cache()
-        cache.update_cache(last_found_secrets=["XXX"])
-        # don't use mock.patch decorator on the test, since Cache.__init__ also calls open
-        with patch("builtins.open") as open_mock:
-            # The read-only FS is simulated with patched builtin open raising an error
-            open_mock.side_effect = OSError("Read-only file system")
-            cache.save()
-            # Make sure our patched open was called
-            open_mock.assert_called_once()
-
-    @pytest.mark.parametrize("with_entry", [True, False])
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    def test_save_cache_first_time(self, isolated_fs, with_entry):
-        """
-        GIVEN no existing cache
-        WHEN save is called but there are (new entries/no entries in memory)
-        THEN it should (create/not create) the file
-        """
-        cache = Cache()
-        if with_entry:
-            cache.update_cache(last_found_secrets=["XXX"])
-        cache.save()
-
-        assert os.path.isfile(".cache_ggshield") is with_entry
-
-    @patch("ggshield.config.LOCAL_CONFIG_PATHS", [".gitguardian.yml"])
-    def test_max_commits_for_hook_setting(self, cli_fs_runner):
-        """
-        GIVEN a yaml config with `max-commits-for-hook=75`
-        WHEN the config gets parsed
-        THEN the default value of max_commits_for_hook (50) should be replaced with 75
-        """
-        with open(".gitguardian.yml", "w") as file:
-            file.write(yaml.dump({"max-commits-for-hook": 75}))
-
-        config = Config()
-        assert config.max_commits_for_hook == 75
