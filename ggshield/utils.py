@@ -2,7 +2,9 @@ import os
 import re
 import traceback
 from enum import Enum
+from multiprocessing.sharedctypes import Value
 from typing import Iterable, List, NamedTuple
+from urllib.parse import urlparse
 
 import click
 from dotenv import load_dotenv
@@ -275,3 +277,37 @@ def load_dot_env() -> None:
         if is_git_dir() and os.path.isfile(os.path.join(get_git_root(), ".env")):
             load_dotenv(os.path.join(get_git_root(), ".env"), override=True)
             return
+
+
+def dashboard_to_api_url(dashboard_url: str) -> str:
+    parsed_url = urlparse(dashboard_url)
+    if parsed_url.scheme != "https":
+        raise ValueError(
+            f"Invalid scheme for dashboard URL '{dashboard_url}', expected HTTPS"
+        )
+    if parsed_url.netloc.endswith(".gitguardian.com"):  # SaaS
+        if parsed_url.path:
+            raise ValueError(
+                f"Invalid dashboard URL '{dashboard_url}', got an unexpected path"
+            )
+        parsed_url = parsed_url._replace(
+            netloc=parsed_url.netloc.replace("dashboard", "api")
+        )
+    else:
+        parsed_url = parsed_url._replace(path="/exposed")
+    return parsed_url.geturl()
+
+
+def api_to_dashboard_url(api_url: str) -> str:
+    parsed_url = urlparse(api_url)
+    if parsed_url.scheme != "https":
+        raise ValueError(f"Invalid scheme for API URL '{api_url}', expected HTTPS")
+    if parsed_url.netloc.endswith(".gitguardian.com"):  # SaaS
+        if parsed_url.path:
+            raise ValueError(f"Invalid API URL '{api_url}', got an unexpected path")
+        parsed_url = parsed_url._replace(
+            netloc=parsed_url.netloc.replace("api", "dashboard")
+        )
+    else:
+        parsed_url = parsed_url._replace(path="")
+    return parsed_url.geturl()

@@ -2,7 +2,6 @@ import copy
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta
-from functools import cached_property
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type, Union
 
@@ -12,13 +11,13 @@ from appdirs import user_config_dir
 
 from ggshield.constants import (
     AUTH_CONFIG_FILENAME,
-    DEFAULT_API_URL,
     DEFAULT_DASHBOARD_URL,
     DEFAULT_LOCAL_CONFIG_PATH,
     GLOBAL_CONFIG_FILENAMES,
     LOCAL_CONFIG_PATHS,
 )
 from ggshield.types import IgnoredMatch
+from ggshield.utils import api_to_dashboard_url, dashboard_to_api_url
 
 
 def replace_in_keys(
@@ -139,7 +138,7 @@ class YamlFileConfig:
 
 @dataclass
 class UserConfig(YamlFileConfig):
-    api_url: str = DEFAULT_API_URL
+    api_url: str = dashboard_to_api_url(DEFAULT_DASHBOARD_URL)
     dashboard_url: str = DEFAULT_DASHBOARD_URL
     config_path: Optional[str] = None
     all_policies: bool = False
@@ -154,7 +153,32 @@ class UserConfig(YamlFileConfig):
     ignore_default_excludes: bool = False
 
     def __post_init__(self) -> None:
-        self.api_url = os.getenv("GITGUARDIAN_API_URL", DEFAULT_API_URL)
+        """
+        If one of the URL env vars is defined, set them both
+        """
+        # TODO this may wrongly be overriden by the local/global
+        api_url = os.getenv("GITGUARDIAN_API_URL")
+        dashboard_url = os.getenv("GITGUARDIAN_URL")
+        if api_url is not None:
+            if dashboard_url is None:
+                dashboard_url = api_to_dashboard_url(api_url)
+            self.api_url = api_url
+            self.dashboard_url = dashboard_url
+        elif dashboard_url is not None:
+            api_url = dashboard_to_api_url(dashboard_url)
+            self.api_url = api_url
+            self.dashboard_url = dashboard_url
+
+    def update_config(self, data: Dict[str, Any]) -> bool:
+        """
+        URLs should always be both set together to make sure they belong
+        to the same host
+        """
+        if "dashboard_url" in data and "api_url" not in data:
+            data["api_url"] = dashboard_to_api_url(data.pop("dashboard_url"))
+        elif "dashboard_url" not in data and "api_url" in data:
+            data["dashboard_url"] = api_to_dashboard_url(data.pop("api_url"))
+        return super().update_config(data)
 
     def save(self) -> None:
         """
@@ -256,6 +280,12 @@ class HostConfig:
         data["accounts"] = [data.pop("account")]
         return data
 
+    @property
+    def expired(self):
+        return (
+            self.account.expire_at is not None and self.account.expire_at <= datetime()
+        )
+
 
 def get_auth_config_dir() -> str:
     dir_path: str = user_config_dir(appname="ggshield", appauthor="GitGuardian")
@@ -272,9 +302,19 @@ def ensure_path_exists(dir_path: str) -> None:
 
 @dataclass
 class AuthConfig(YamlFileConfig):
+    current_token: Optional[str] = None
+    current_host: Optional[str] = None
     default_host: str = "https://dashboard.gitguardian.com"
     default_token_lifetime: Optional[int] = None
     hosts: Mapping[str, HostConfig] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.current_token = os.getenv("GITGUARDIAN_API_KEY", self.current_token)
+
+    def to_dict(self):
+        data = super().to_dict()
+        data.pop("current_host")
+        return data
 
     @classmethod
     def load(cls) -> "AuthConfig":
@@ -292,6 +332,20 @@ class AuthConfig(YamlFileConfig):
         config_path = get_auth_config_filepath()
         ensure_path_exists(get_auth_config_dir())
         self.save_yaml(config_path)
+
+    def get_host_token(self, hostname: str) -> str:
+        """
+        Return the API token associated with the given host if it is still valid.
+        """
+        try:
+            host = self.hosts[hostname]
+        except KeyError:
+            raise click.ClickException(f"Unrecognized host:'{hostname}'")
+        if host.expired:
+            raise click.ClickException(
+                f"Host '{hostname}' authentication expired, please authenticate again."
+            )
+        return host.account.token
 
 
 def get_attr_mapping(
@@ -339,11 +393,26 @@ class Config:
         self.user_config.save()
         self.auth_config.save()
 
-    @cached_property
+    @property
+    def gitguardian_hostname(self):
+        hostname = self.auth_config.current_host
+        if hostname is None:
+            hostname = self.user_config.dashboard_url
+            if hostname is None:
+                hostname = self.auth_config.default_host
+            else:
+                if hostname not in self.auth_config.hosts:
+                    raise click.ClickException(f"Unrecognized host '{hostname}'")
+        return hostname
+
+    @property
     def gitguardian_api_key(self) -> Optional[str]:
-        api_key = os.getenv("GITGUARDIAN_API_KEY")
-        if not api_key:
-            raise click.ClickException("GitGuardian API Key is needed.")
+        api_key = self.auth_config.current_token
+        if api_key is None:
+            hostname = self.gitguardian_hostname
+            api_key = self.auth_config.get_host_token(hostname)
+            if api_key is None:
+                raise click.ClickException("GitGuardian API key is needed.")
         return api_key
 
     def add_ignored_match(self, *args: Any, **kwargs: Any) -> None:

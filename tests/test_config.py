@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 import yaml
+from click import ClickException
 from click.testing import CliRunner
 from mock import patch
 
@@ -261,3 +262,132 @@ class TestAuthConfig:
         updated_config = Config()
 
         assert updated_config.default_host == "custom"
+
+
+@patch(
+    "ggshield.config.get_auth_config_filepath",
+    Mock(return_value=(auth_config_filepath)),
+)
+@pytest.mark.usefixtures("env_vars")
+class TestConfig:
+    def set_hosts(
+        self,
+        local_filepath,
+        global_filepath,
+        local_host=None,
+        global_host=None,
+        default_host=None,
+    ):
+        if local_host:
+            write(local_filepath, {"api-url": local_host})
+        if global_host:
+            write(global_filepath, {"api-url": global_host})
+        if default_host:
+            ensure_path_exists("/".join(auth_config_filepath.split("/")[:-1]))
+            with open(auth_config_filepath, "w") as f:
+                print("auth_config_filepath", auth_config_filepath)
+                data = deepcopy(TestAuthConfig.default_config)
+                data["default_host"] = default_host
+                if local_host:
+                    data["hosts"][local_host] = deepcopy(data["hosts"]["default"])
+                if global_host:
+                    data["hosts"][global_host] = deepcopy(data["hosts"]["default"])
+                f.write(yaml.dump(data))
+
+    @pytest.mark.parametrize(
+        [
+            "current_host",
+            "env_host",
+            "local_host",
+            "global_host",
+            "default_host",
+            "expected_host",
+        ],
+        [
+            [
+                "https://host1.com",
+                "https://host2.com",
+                "https://host3.com",
+                "https://host4.com",
+                "https://host5.com",
+                "https://host1.com",
+            ],
+            [
+                None,
+                "https://host2.com",
+                "https://host3.com",
+                "https://host4.com",
+                "https://host5.com",
+                "https://host2.com",
+            ],
+            [
+                None,
+                None,
+                "https://host3.com",
+                "https://host4.com",
+                "https://host5.com",
+                "https://host3.com",
+            ],
+            [
+                None,
+                None,
+                None,
+                "https://host4.com",
+                "https://host5.com",
+                "https://host4.com",
+            ],
+            [
+                None,
+                None,
+                None,
+                None,
+                "https://host5.com",
+                "https://host5.com",
+            ],
+        ],
+    )
+    def test_host_fallbacks(
+        self,
+        current_host,
+        env_host,
+        local_host,
+        global_host,
+        default_host,
+        expected_host,
+        local_config_path,
+        global_config_path,
+        monkeypatch,
+    ):
+        os.environ["GITGUARDIAN_URL"] = env_host
+        if "GITGUARDIAN_API_URL" in os.environ:
+            del os.environ["GITGUARDIAN_API_URL"]
+        self.set_hosts(
+            local_host=local_host,
+            global_host=global_host,
+            default_host=default_host,
+            local_filepath=local_config_path,
+            global_filepath=global_config_path,
+        )
+        config = Config()
+        config.current_host = current_host
+
+        assert config.gitguardian_hostname == expected_host
+
+    def test_no_host(self, local_config_path, global_config_path):
+        self.set_hosts(
+            local_host=None,
+            global_host=None,
+            default_host=None,
+            local_filepath=local_config_path,
+            global_filepath=global_config_path,
+        )
+        config = Config()
+
+        assert config.gitguardian_hostname
+
+    def test_host_not_in_auth_config(self):
+        config = Config()
+        config.current_host = "toto"
+
+        with pytest.raises(ClickException, match="Unrecognized host 'toto'"):
+            config.gitguardian_hostname

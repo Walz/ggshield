@@ -511,11 +511,15 @@ def cache() -> Cache:
 
 
 @pytest.fixture(scope="session")
-def cli_runner():
+def env_vars():
+    os.environ["GITGUARDIAN_API_URL"] = "https://api.gitguardian.com"
+
+
+@pytest.fixture(scope="session")
+def cli_runner(env_vars):
     os.environ["GITGUARDIAN_API_KEY"] = os.getenv(
         "TEST_GITGUARDIAN_API_KEY", "1234567890"
     )
-    os.environ["GITGUARDIAN_API_URL"] = "https://api.gitguardian.com"
     return CliRunner()
 
 
